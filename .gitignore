@@ -1,0 +1,10 @@
+.env
+*.session
+*.session-journal
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+live_ethio_exports/
+telegram_exports/
+*.pyc
+.venv/
