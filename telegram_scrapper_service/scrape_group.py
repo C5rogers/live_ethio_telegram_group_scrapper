@@ -326,6 +326,7 @@ def parse_rental_message(text: str) -> dict[str, Any]:
         attributes=attributes,
     )
 
+    price_display = price_info["price_display"] or _extract_price_from_attributes(attributes)
     property_type = title or family["listing_type_label"]
     city, district = split_location(location_text)
 
@@ -343,6 +344,7 @@ def parse_rental_message(text: str) -> dict[str, Any]:
         "location_text": location_text,
         "currency": price_info["currency"],
         "price_text": price_info["price_text"],
+        "price_display": price_display,
         "price_etb": price_info["price_etb"],
         "price_period": price_info["price_period"],
         "price_type": price_info["price_type"],
@@ -376,9 +378,9 @@ def extract_title(lines: list[str], fallback_text: str) -> str:
 
 def extract_price(text: str) -> dict[str, Any]:
     patterns = [
-        r"(?P<label>ኪራይ)\s*[:፡]?\s*(?P<amount>[\d,]+(?:\.\d+)?)\s*(?P<currency>ብር|ETB|Birr|Br|birr|etb)?",
-        r"(?P<currency>ETB|Birr|Br|birr|etb|ብር)\s*[:\-]?\s*(?P<amount>[\d,]+(?:\.\d+)?)",
-        r"(?P<amount>[\d,]+(?:\.\d+)?)\s*(?P<currency>ETB|Birr|Br|birr|etb|ብር)",
+        r"(?P<label>ኪራይ)\s*[:፡]?\s*(?P<amount>[\d,]+(?:\.\d+)?)\s*(?P<currency>ብር|ETB|Birr|Br|birr|etb|USD|US\$)?",
+        r"(?P<currency>ETB|Birr|Br|birr|etb|ብር|USD|US\$)\s*[:\-]?\s*(?P<amount>[\d,]+(?:\.\d+)?)",
+        r"(?P<amount>[\d,]+(?:\.\d+)?)\s*(?P<currency>ETB|Birr|Br|birr|etb|ብር|USD|US\$)",
     ]
     price_text = None
     amount = None
@@ -390,6 +392,25 @@ def extract_price(text: str) -> dict[str, Any]:
             currency = match.group("currency")
             price_text = match.group(0)
             break
+
+    if not price_text:
+        for line in text.splitlines():
+            normalized = normalize_line(line)
+            lowered = normalized.lower()
+            if "price" not in lowered and "ኪራይ" not in lowered:
+                continue
+            if ":" not in normalized and "፡" not in normalized and "-" not in normalized and "=" not in normalized:
+                continue
+            key, value = split_label_value(normalized, return_key=True)
+            if not key or not value:
+                continue
+            if "price" in key.lower() or "ኪራይ" in key.lower():
+                amount_match = re.search(r"[\d,]+(?:\.\d+)?", value)
+                if amount_match:
+                    amount = amount_match.group(0)
+                    currency = _detect_currency_from_text(key) or _detect_currency_from_text(value)
+                    price_text = f"{strip_markers(key)}: {value}"
+                    break
 
     price_period = None
     lowered = text.lower()
@@ -419,6 +440,7 @@ def extract_price(text: str) -> dict[str, Any]:
         "currency": normalize_currency(currency),
         "price_period": price_period,
         "price_type": price_type,
+        "price_display": _build_price_display(price_text, amount, currency),
     }
 
 
@@ -684,7 +706,50 @@ def normalize_currency(currency: str | None) -> str | None:
     lowered = currency.lower()
     if lowered in {"etb", "birr", "br", "ብር"}:
         return "ETB"
+    if lowered in {"usd", "us$", "$"}:
+        return "USD"
     return currency.upper()
+
+
+def _detect_currency_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    lowered = text.lower()
+    if "usd" in lowered or "$" in text:
+        return "USD"
+    if any(marker in lowered for marker in ("etb", "birr", "br", "ብር")):
+        return "ETB"
+    return None
+
+
+def _build_price_display(price_text: str | None, amount: str | None, currency: str | None) -> str | None:
+    if price_text:
+        return price_text
+    if amount:
+        normalized_currency = normalize_currency(currency)
+        if normalized_currency:
+            return f"{normalized_currency} {amount}"
+        return amount
+    return None
+
+
+def _extract_price_from_attributes(attributes: dict[str, str]) -> str | None:
+    for key, value in attributes.items():
+        key_text = str(key).lower()
+        value_text = normalize_line(str(value))
+        if not value_text:
+            continue
+        if "price" not in key_text and "rent" not in key_text and "ኪራይ" not in key_text:
+            continue
+        amount_match = re.search(r"[\d,]+(?:\.\d+)?", value_text)
+        if amount_match:
+            currency = _detect_currency_from_text(key_text) or _detect_currency_from_text(value_text)
+            prefix = str(key).replace("_", " ").strip().title()
+            if currency:
+                return f"{prefix}: {currency} {amount_match.group(0)}"
+            return f"{prefix}: {amount_match.group(0)}"
+        return f"{str(key).replace('_', ' ').strip().title()}: {value_text}"
+    return None
 
 
 def strip_markers(value: str) -> str:

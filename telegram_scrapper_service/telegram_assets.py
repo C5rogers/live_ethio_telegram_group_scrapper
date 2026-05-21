@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,7 @@ def build_telegram_post_html(
     description_lines = format_description_lines(
         item.get("description"),
         max_lines=max_description_lines,
+        exclude_price_texts=_build_price_exclusions(item),
     )
     listing_url = str(item.get("listing_url") or "N/A")
     listing_link_line = format_listing_link_line(listing_url, link_as_anchor=link_as_anchor)
@@ -135,16 +137,33 @@ def format_location_line(item: dict[str, Any]) -> str:
 
 
 def format_price_line(item: dict[str, Any]) -> str:
-    price = escape_html(item.get("price_text") or "N/A")
-    if item.get("price_etb") not in (None, ""):
+    price_source = item.get("price_display") or item.get("price_text") or "N/A"
+    price = escape_html(price_source)
+    if price == "N/A":
+        fallback_price = _extract_price_from_attributes_for_template(item.get("attributes") or {})
+        if fallback_price:
+            price = escape_html(fallback_price)
+    if item.get("price_etb") not in (None, "") and str(item.get("currency") or "").upper() == "ETB":
         price = f"{price} (<code>{escape_html(str(item['price_etb']))}</code> ETB)"
     return f"💰 <b>ዋጋ:</b> {price}"
 
 
-def format_description_lines(description: Any, max_lines: int | None = None) -> list[str]:
+def format_description_lines(
+    description: Any,
+    max_lines: int | None = None,
+    exclude_price_texts: set[str] | None = None,
+) -> list[str]:
     if description in (None, ""):
         return ["N/A"]
-    lines = [escape_html(line.strip()) for line in str(description).splitlines() if line.strip()]
+    exclude = {normalize_text(value) for value in (exclude_price_texts or set()) if normalize_text(value)}
+    lines: list[str] = []
+    for line in str(description).splitlines():
+        raw_line = line.strip()
+        if not raw_line:
+            continue
+        if normalize_text(raw_line) in exclude:
+            continue
+        lines.append(escape_html(raw_line))
     if max_lines is not None:
         lines = lines[:max_lines]
     return lines or ["N/A"]
@@ -249,4 +268,54 @@ def _pick_field(item: dict[str, Any], keys: list[str]) -> Any:
     for key in keys:
         if item.get(key) not in (None, ""):
             return item.get(key)
+    return None
+
+
+
+def _build_price_exclusions(item: dict[str, Any]) -> set[str]:
+    exclusions: set[str] = set()
+    for candidate in (
+        item.get("price_display"),
+        item.get("price_text"),
+    ):
+        normalized = normalize_text(candidate)
+        if normalized:
+            exclusions.add(normalized)
+
+    attributes = item.get("attributes") or {}
+    for key, value in attributes.items():
+        key_text = str(key).lower()
+        value_text = str(value).strip()
+        if not value_text:
+            continue
+        if "price" in key_text or "rent" in key_text or "ኪራይ" in key_text:
+            exclusions.add(normalize_text(f"{key}: {value_text}"))
+            exclusions.add(normalize_text(value_text))
+    return {value for value in exclusions if value}
+
+
+def normalize_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = " ".join(text.split())
+    return text
+
+
+
+def _extract_price_from_attributes_for_template(attributes: dict[str, Any]) -> str | None:
+    for key, value in attributes.items():
+        key_text = str(key).lower()
+        value_text = str(value).strip()
+        if not value_text:
+            continue
+        if "price" not in key_text and "rent" not in key_text and "ኪራይ" not in key_text:
+            continue
+        amount_match = re.search(r"[\d,]+(?:\.\d+)?", value_text)
+        if amount_match:
+            currency = ""
+            if "usd" in key_text or "$" in key_text or "usd" in value_text.lower() or "$" in value_text:
+                currency = "USD "
+            elif any(marker in key_text for marker in ("etb", "birr", "br", "ብር")) or any(marker in value_text.lower() for marker in ("etb", "birr", "br", "ብር")):
+                currency = "ETB "
+            return f"{key}: {currency}{amount_match.group(0)}".replace("  ", " ").strip()
+        return f"{key}: {value_text}"
     return None
